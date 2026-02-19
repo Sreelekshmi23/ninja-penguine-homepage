@@ -11,7 +11,7 @@ import {
     Copy,
     Check
 } from "lucide-react";
-import { collection, addDoc, serverTimestamp } from "firebase/firestore";
+import { serverTimestamp, doc, getDoc, updateDoc, runTransaction } from "firebase/firestore";
 import { db } from "../firebase";
 
 import * as XLSX from "xlsx";
@@ -67,12 +67,69 @@ export default function FormPage() {
     const [files, setFiles] = useState([]);
     const [requestId, setRequestId] = useState("");
     const [copied, setCopied] = useState(false);
+    const [editModeId, setEditModeId] = useState(null);
+
+    // --- Effects ---
+    React.useEffect(() => {
+        const params = new URLSearchParams(window.location.search);
+        const editId = params.get("edit");
+        if (editId) {
+            setEditModeId(editId);
+            fetchRequestData(editId);
+        }
+    }, []);
+
+    const fetchRequestData = async (id) => {
+        try {
+            const docRef = doc(db, "requests", id);
+            const docSnap = await getDoc(docRef);
+            if (docSnap.exists()) {
+                const data = docSnap.data();
+                setFormData({
+                    integratorName: data.integratorName || "",
+                    officeAddress: data.officeAddress || "",
+                    contactPerson: data.contactPerson || "",
+                    contactNo: data.contactNo || "",
+                    email: data.email || "",
+                    customerProjectSite: data.customerProjectSite || "",
+                    customerContact: data.customerContact || "",
+                    customerAlternate: data.customerAlternate || "",
+                    customerEmail: data.customerEmail || "",
+                    customerAlternateEmail: data.customerAlternateEmail || ""
+                });
+                if (data.serialNumbers && data.serialNumbers.length > 0) {
+                    setSerialNumbers(data.serialNumbers);
+                }
+                if (data.sitePictures && data.sitePictures.length > 0) {
+                    setPreviewImages(data.sitePictures);
+                    // Start with existing images. We'll handle mixing new files + existing URLs in submit
+                }
+            } else {
+                alert("Request not found for editing.");
+            }
+        } catch (error) {
+            console.error("Error fetching request:", error);
+            alert("Failed to load request data.");
+        }
+    };
 
     // --- Handlers ---
 
     const handleChange = (e) => {
         const { name, value } = e.target;
-        setFormData(prev => ({ ...prev, [name]: value }));
+        let sanitizedValue = value;
+
+        // Validation: Only numbers for phone fields
+        if (["contactNo", "customerAlternate"].includes(name)) {
+            sanitizedValue = value.replace(/[^0-9]/g, "");
+        }
+
+        // Validation: Alphanumeric + standard email symbols for email fields
+        if (["email", "customerEmail", "customerAlternateEmail"].includes(name)) {
+            sanitizedValue = value.replace(/[^a-zA-Z0-9@._-]/g, "");
+        }
+
+        setFormData(prev => ({ ...prev, [name]: sanitizedValue }));
     };
 
     const addSerialNumber = () => {
@@ -124,12 +181,24 @@ export default function FormPage() {
                     .filter(cell => cell !== undefined && cell !== null && String(cell).trim() !== "");
 
                 if (newSerialNumbers.length > 0) {
-                    // If the current list only has one empty entry, replace it. Otherwise append.
                     setSerialNumbers(prev => {
-                        if (prev.length === 1 && prev[0] === "") {
-                            return newSerialNumbers.map(String);
+                        // Create a set of existing serial numbers (trimmed and lowercase for case-insensitive check if needed, but let's stick to exact match for now)
+                        const existingSet = new Set(prev.map(s => String(s).trim()));
+                        // Deduplicate within the new batch itself first, then filter against existing
+                        const uniqueNew = [...new Set(newSerialNumbers.map(String).map(s => s.trim()))]
+                            .filter(s => s && !existingSet.has(s)); // Filter out empty strings and duplicates
+
+                        // If all new numbers were duplicates
+                        if (uniqueNew.length < newSerialNumbers.length) {
+                            alert(`Filtered out ${newSerialNumbers.length - uniqueNew.length} duplicate serial number(s).`);
                         }
-                        return [...prev, ...newSerialNumbers.map(String)];
+
+                        if (prev.length === 1 && prev[0] === "") {
+                            // If the current list is empty/placeholder, just return the unique new ones
+                            return uniqueNew.length > 0 ? uniqueNew : [""];
+                        }
+
+                        return [...prev, ...uniqueNew];
                     });
                 } else {
                     alert("No valid serial numbers found in the first column of the Excel file.");
@@ -154,6 +223,12 @@ export default function FormPage() {
     const handleSubmit = async (e) => {
         e.preventDefault();
 
+        // VALIDATION: Check if at least one image is uploaded (new files OR existing previews)
+        if (files.length === 0 && previewImages.length === 0) {
+            alert("Please upload at least one site picture to proceed.");
+            return;
+        }
+
         // VALIDATION: Check for placeholder keys
         const apiKey = process.env.REACT_APP_FIREBASE_API_KEY;
         if (!apiKey || apiKey.includes("your_")) {
@@ -169,16 +244,77 @@ export default function FormPage() {
             const uploadedImageUrls = await Promise.all(uploadPromises);
 
             // 2. Save Data to Firestore
-            const docRef = await addDoc(collection(db, "requests"), {
+            let finalDocId;
+            const requestData = {
                 ...formData,
-                serialNumbers: serialNumbers.filter(s => s.trim()),
-                sitePictures: uploadedImageUrls,
-                status: "pending",
-                createdAt: serverTimestamp()
-            });
+                serialNumbers: [...new Set(serialNumbers.map(s => s.trim()).filter(Boolean))], // Remove duplicates and empty strings
+                // Combine existing URLs (strings) with new uploaded URLs
+                sitePictures: [...previewImages.filter(url => typeof url === 'string' && url.startsWith('http')), ...uploadedImageUrls],
+                status: "pending", // Reset status to pending on edit
+                updatedAt: serverTimestamp()
+            };
 
-            console.log("Form Submitted Successfully. ID:", docRef.id);
-            setRequestId(docRef.id);
+            if (editModeId) {
+                // UPDATE existing document
+                const docRef = doc(db, "requests", editModeId);
+                await updateDoc(docRef, { ...requestData, warrantyCertificateNo: editModeId });
+                finalDocId = editModeId;
+                console.log("Form Updated Successfully. ID:", finalDocId);
+            } else {
+                // CREATE new document with custom ID from counter
+                requestData.createdAt = serverTimestamp();
+
+                await runTransaction(db, async (transaction) => {
+
+                    const counterRef = doc(db, "counters", "warranty_cert");
+                    const counterDoc = await transaction.get(counterRef);
+
+                    // Determine starting point
+                    let nextId;
+                    if (!counterDoc.exists()) {
+                        nextId = 167; // Start at 167 if counter doesn't exist
+                    } else {
+                        nextId = Number(counterDoc.data().currentValue) + 1;
+                    }
+
+                    // Collision Detection Loop: Find the first available ID
+                    // We'll try up to 10 consecutive IDs to find a free slot.
+                    // This handles cases where manual DB edits or race conditions might have taken an ID.
+                    let availableId = null;
+                    let attempts = 0;
+                    const maxAttempts = 10;
+
+                    while (attempts < maxAttempts) {
+                        const candidateId = `WR${String(nextId).padStart(3, '0')}`;
+                        const candidateRef = doc(db, "requests", candidateId);
+                        const candidateDoc = await transaction.get(candidateRef);
+
+                        if (!candidateDoc.exists()) {
+                            availableId = candidateId;
+                            break;
+                        }
+
+                        // ID taken, try next
+                        nextId++;
+                        attempts++;
+                    }
+
+                    if (!availableId) {
+                        throw new Error("Unable to generate a unique Request ID after multiple attempts. Please try again.");
+                    }
+
+                    finalDocId = availableId;
+                    const newRequestRef = doc(db, "requests", finalDocId);
+
+                    // Writes
+                    transaction.set(counterRef, { currentValue: nextId }, { merge: true });
+                    transaction.set(newRequestRef, { ...requestData, warrantyCertificateNo: finalDocId });
+                });
+
+                console.log("Form Submitted Successfully. ID:", finalDocId);
+            }
+
+            setRequestId(finalDocId);
             setIsSubmitting(false);
             setIsSubmitted(true);
         } catch (error) {
@@ -224,7 +360,7 @@ export default function FormPage() {
                         </div>
                         <h2 className="text-3xl font-bold text-slate-800 mb-4">Request Submitted!</h2>
                         <p className="text-slate-500 mb-6 max-w-md mx-auto">
-                            Your installation verification request has been successfully sent.
+                            Your installation verification request has been successfully sent to True Sun for scrutiny.
                         </p>
 
                         {requestId && (
@@ -263,7 +399,7 @@ export default function FormPage() {
                                 className="inline-flex items-center gap-2 px-8 py-3 rounded-xl text-white font-semibold shadow-lg hover:brightness-110 transition-all"
                                 style={{ backgroundColor: PRIMARY_COLOR }}
                             >
-                                Submit Another Request
+                                {editModeId ? "Edit Another Request" : "Submit Another Request"}
                                 <ArrowRight size={18} />
                             </button>
                             <button
@@ -278,25 +414,27 @@ export default function FormPage() {
                     // --- Form State ---
                     <div className="bg-white shadow-xl rounded-2xl p-8 border border-slate-100">
                         {/* Logos Header */}
-                        <div className="flex justify-start items-center mb-6">
+                        <div className="flex justify-between items-center mb-6">
                             <img
                                 src={premier}
                                 alt="Premier Energies"
-                                className="h-20 w-auto object-contain"
+                                className="h-36 w-auto object-contain"
                             />
                             <img
                                 src={trusunlogo}
                                 alt="TRUE Brand"
-                                className="h-24 w-auto object-contain"
+                                className="h-48 w-auto object-contain"
                             />
                         </div>
 
                         <div className="text-center mb-8 border-b border-gray-100 pb-6">
                             <h1 className="text-2xl font-bold mb-2 text-slate-800">
-                                Premier Energies Warranty certificate Request
+                                {editModeId ? "Edit Verification Request" : "Premier Energies Warranty Certificate Request"}
                             </h1>
                             <p className="text-slate-500 text-sm">
-                                Please fill out the details below to verify your installation site.
+                                {editModeId
+                                    ? "Update your details below to resubmit for verification."
+                                    : "Please fill out the details below to verify your installation site."}
                             </p>
                         </div>
 
@@ -456,7 +594,7 @@ export default function FormPage() {
                             {/* Site Pictures */}
                             <div className="md:col-span-2 mt-4">
                                 <label className="block text-sm font-medium text-slate-700 mb-2">
-                                    Site Pictures (Evidence)
+                                    Site Pictures (Evidence) <span className="text-red-500">*</span>
                                 </label>
                                 <div
                                     className={`border-2 border-dashed rounded-xl p-8 text-center transition-colors relative ${isSubmitting ? 'bg-gray-50 border-gray-200' : 'border-slate-300 hover:bg-slate-50 hover:border-slate-400'}`}
@@ -474,7 +612,7 @@ export default function FormPage() {
                                             <Upload size={24} className="text-slate-500" />
                                         </div>
                                         <p className="text-sm font-medium text-slate-700">Click to upload or drag and drop</p>
-                                        <p className="text-xs text-slate-400 mt-1">SVG, PNG, JPG or GIF (Max 5MB)</p>
+                                        <p className="text-xs text-slate-400 mt-1">SVG, PNG, JPG or GIF (Max 3MB)</p>
                                     </div>
                                 </div>
 
@@ -519,7 +657,7 @@ export default function FormPage() {
                                     ) : (
                                         <>
                                             <Save size={20} />
-                                            Submit Verification Request
+                                            {editModeId ? "Update Request" : "Submit Verification Request"}
                                         </>
                                     )}
                                 </button>

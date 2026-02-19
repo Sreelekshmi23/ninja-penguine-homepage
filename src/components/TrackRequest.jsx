@@ -1,7 +1,9 @@
 import React, { useState } from 'react';
-import { Search, ArrowLeft, Loader2, CheckCircle, XCircle, Clock, AlertCircle } from 'lucide-react';
+import { Search, ArrowLeft, Loader2, CheckCircle, XCircle, Clock, AlertCircle, Edit2 } from 'lucide-react';
 import { doc, getDoc } from 'firebase/firestore';
 import { db } from '../firebase';
+
+import trusunlogo from "../assets/Images/Trusunlogo.png";
 
 const TrackRequest = () => {
     const [requestId, setRequestId] = useState('');
@@ -44,7 +46,7 @@ const TrackRequest = () => {
         if (['accepted', 'approved', 'verified', 'completed'].includes(normalizedStatus)) {
             return {
                 icon: <CheckCircle className="w-16 h-16 text-green-500" />,
-                title: status, // Show original casing or specific text
+                title: "Request Accepted by True Sun",
                 desc: "Your request has been successfully processed and approved.",
                 color: "bg-green-50 border-green-200 text-green-700"
             };
@@ -53,7 +55,7 @@ const TrackRequest = () => {
         if (['rejected', 'declined', 'denied'].includes(normalizedStatus)) {
             return {
                 icon: <XCircle className="w-16 h-16 text-red-500" />,
-                title: status,
+                title: "Request Rejected by True Sun",
                 desc: "Your request was declined. Please contact support for details.",
                 color: "bg-red-50 border-red-200 text-red-700"
             };
@@ -62,7 +64,7 @@ const TrackRequest = () => {
         if (['pending', 'in review', 'processing'].includes(normalizedStatus)) {
             return {
                 icon: <Clock className="w-16 h-16 text-amber-500" />,
-                title: status || "In Review",
+                title: "Request Pending with True Sun",
                 desc: "We are currently reviewing your request. Please check back later.",
                 color: "bg-amber-50 border-amber-200 text-amber-700"
             };
@@ -98,7 +100,7 @@ const TrackRequest = () => {
                         <ArrowLeft className="w-5 h-5 mr-2" />
                         Back to Home
                     </button>
-                    <h1 className="ml-auto font-bold text-lg text-slate-800 uppercase tracking-widest">TRUE SUN</h1>
+                    <img src={trusunlogo} alt="TRUE Brand" className="ml-auto h-36 w-auto object-contain" />
                 </div>
             </header>
 
@@ -119,7 +121,7 @@ const TrackRequest = () => {
                                 type="text"
                                 value={requestId}
                                 onChange={(e) => setRequestId(e.target.value)}
-                                placeholder="Request ID (e.g. 7A2B9C)"
+                                placeholder="Request ID (e.g. WR167)"
                                 className="w-full h-14 pl-5 pr-14 rounded-2xl border-2 border-white/50 bg-white/80 focus:bg-white focus:border-[#0F40C5] focus:ring-4 focus:ring-[#0F40C5]/10 outline-none text-lg transition-all shadow-sm placeholder:text-slate-400 font-medium"
                             />
                             <button
@@ -139,6 +141,17 @@ const TrackRequest = () => {
                             </div>
                             <h3 className="text-2xl font-bold mb-2 tracking-tight">{statusConfig.title}</h3>
                             <p className="opacity-90 leading-relaxed text-sm font-medium">{statusConfig.desc}</p>
+
+                            {/* Edit Button for Rejected Requests */}
+                            {['rejected', 'declined', 'denied'].includes(status?.toLowerCase()) && (
+                                <button
+                                    onClick={() => window.location.href = `/?form&edit=${requestId}`}
+                                    className="mt-6 inline-flex items-center gap-2 px-6 py-2.5 rounded-xl bg-white border border-red-200 text-red-600 font-semibold hover:bg-red-50 hover:border-red-300 transition-all shadow-sm"
+                                >
+                                    <Edit2 size={18} />
+                                    Edit & Resubmit Request
+                                </button>
+                            )}
                         </div>
                     )}
 
